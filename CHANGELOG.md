@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `herdr-bar.open` works on Windows too, so one keybinding works on every
+  platform. The action runs the binary's `--open` instead of an `sh`
+  one-liner. `herdr-bar.open-windows` still works on Windows, for configs
+  that bind it.
+
 ## 0.9.1
 
 - Fix tab titles and tab status on Windows, broken in 0.9.0: the lock files
