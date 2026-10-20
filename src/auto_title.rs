@@ -427,8 +427,20 @@ fn first_truthy<'a>(values: &[&'a Value]) -> &'a Value {
     values.iter().find(|v| v.truthy()).copied().unwrap_or(&NULL)
 }
 
+/// omp titles read `π > 🤝 HANDOF: Fix login`, or `π ⠙ 📊 BAR: Fix login`
+/// while working; the task is `Fix login`.
+fn omp_task(title: &str) -> &str {
+    let Some(rest) = title.strip_prefix('π') else { return title };
+    let rest = rest.trim_start_matches(|c: char| !c.is_alphanumeric());
+    match rest.split_once(": ") {
+        Some((tag, task)) if !tag.is_empty() && tag.chars().all(|c| c.is_ascii_uppercase()) => task,
+        _ => rest,
+    }
+}
+
 pub(crate) fn agent_title(agent: &Value, pane: &Value) -> String {
-    let mut title = title_of(first_truthy(&[agent.get("terminal_title_stripped"), pane.get("terminal_title_stripped")]));
+    let raw = title_of(first_truthy(&[agent.get("terminal_title_stripped"), pane.get("terminal_title_stripped")]));
+    let mut title = omp_task(&raw).to_string();
     let cwd = str_or_empty(first_truthy(&[agent.get("cwd"), pane.get("cwd")]));
     let folder = pyos::path_name(cwd);
     let suffix = format!(" | {}", folder);
@@ -437,7 +449,7 @@ pub(crate) fn agent_title(agent: &Value, pane: &Value) -> String {
         title = pystr::strip(&title.chars().take(keep).collect::<String>()).to_string();
     }
     let folded = pystr::casefold(&title);
-    let generic = ["", "codex", "claude", "claude code"];
+    let generic = ["", "codex", "claude", "claude code", "omp", "π"];
     if generic.contains(&folded.as_str())
         || folded == pystr::casefold(&folder)
         || folded == pystr::casefold(cwd)
@@ -583,9 +595,11 @@ pub fn candidates(snapshot: &Value, owned: &Map) -> Vec<(String, Candidate)> {
         if !pane.truthy() || pane.get("label").truthy() || (name.truthy() && !default_agent_name(name, agent.get("agent"), cwd)) {
             continue;
         }
-        let session = first_truthy(&[agent.get("agent_session"), pane.get("agent_session")]);
         let kind = agent.get("agent");
-        let Some(kind_text) = kind.as_str().filter(|k| *k == "claude" || *k == "codex") else { continue };
+        let Some(kind_text) = kind.as_str().filter(|k| matches!(*k, "claude" | "codex" | "omp")) else { continue };
+        // omp reports a session path, not an id; its tabs follow the terminal title.
+        let session =
+            if kind_text == "omp" { &NULL } else { first_truthy(&[agent.get("agent_session"), pane.get("agent_session")]) };
         let suggested = agent_title(agent, pane);
         let mut session_id: Option<String> = None;
         if session.truthy() {
@@ -837,6 +851,17 @@ mod tests {
         assert!(!default_agent_name(&Value::str("herdr-bar-1"), &kind, "/src/herdr-bar"));
         assert!(default_agent_name(&Value::str("claude-1x"), &kind, "/src/1x"));
         assert!(!default_agent_name(&Value::str("mine"), &kind, "/src/herdr-bar"));
+    }
+
+    #[test]
+    fn omp_titles_drop_prompt_and_tag() {
+        let pane = Value::Dict(Map::new());
+        let agent = |title: &str| pyjson::loads(&format!(r#"{{"terminal_title_stripped": {}}}"#, pyjson::dumps(&Value::str(title), false))).unwrap();
+        assert_eq!(agent_title(&agent("π > 🤝 HANDOF: Compare handoffs"), &pane), "Compare handoffs");
+        assert_eq!(agent_title(&agent("π ⠙ 📊 BAR: Compare handoffs"), &pane), "Compare handoffs");
+        assert_eq!(agent_title(&agent("π > Fix login: retry"), &pane), "Fix login: retry");
+        assert_eq!(agent_title(&agent("π"), &pane), "");
+        assert_eq!(agent_title(&agent("Fix login"), &pane), "Fix login");
     }
 
     // -- ports of tests/test_auto_title.py ------------------------------------

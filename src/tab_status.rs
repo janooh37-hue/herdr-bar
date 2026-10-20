@@ -439,6 +439,62 @@ impl TabStatus {
         }
         let gone: Vec<String> = self.records.keys().filter(|k| !live.contains(k)).cloned().collect();
         self.forget(&gone);
+        self.report_marks(snapshot);
+    }
+
+    /// Sidebar parts per agent pane: the status glyph as its `state_text` and
+    /// `$bar_tab` as the tab's logo and bare name, so a sidebar row can read
+    /// `✓ GSSG π 2` while the tab bar keeps `π  ✓ 2`.
+    fn report_marks(&mut self, snapshot: &Shared) {
+        if !self.enabled {
+            return;
+        }
+        // (pane_id, agent kind, $bar_tab) for panes whose metadata is out of date.
+        let mut stale: Vec<(String, String, String)> = Vec::new();
+        {
+            let snapshot = snapshot.borrow();
+            let tabs = snapshot.get("tabs").list_or_empty();
+            for agent in snapshot.get("agents").list_or_empty() {
+                let (Some(pane_id), Some(kind)) = (agent.get("pane_id").as_str(), agent.get("agent").as_str()) else { continue };
+                let Some(base) = tabs.iter().find(|t| py_eq(t.get("tab_id"), agent.get("tab_id"))).and_then(|t| t.get("label").as_str())
+                else {
+                    continue;
+                };
+                let token = match if self.logos { icons::logo_for(Some(kind)) } else { None } {
+                    Some(logo) => format!("{} {}", logo, base),
+                    None => base.to_string(),
+                };
+                let labels = agent.get("state_labels");
+                let current = GLYPHS.iter().all(|(status, g)| labels.get(status).as_str() == Some(g.to_string().as_str()));
+                if !current || agent.get("tokens").get("bar_tab").as_str() != Some(token.as_str()) {
+                    stale.push((pane_id.to_string(), kind.to_string(), token));
+                }
+            }
+        }
+        for (pane_id, kind, token) in stale {
+            let mut labels = Map::new();
+            let mut cli: Vec<String> = ["pane", "report-metadata", pane_id.as_str(), "--source", "herdr-bar", "--agent", kind.as_str()]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            for (status, g) in GLYPHS {
+                labels.insert(*status, Value::str(g.to_string()));
+                cli.extend(["--state-label".to_string(), format!("{}={}", status, g)]);
+            }
+            cli.extend(["--token".to_string(), format!("bar_tab={}", token)]);
+            let mut tokens = Map::new();
+            tokens.insert("bar_tab", Value::str(token));
+            let params = dict(vec![
+                ("pane_id", Value::str(pane_id)),
+                ("source", Value::str("herdr-bar")),
+                ("agent", Value::str(kind)),
+                ("state_labels", Value::Dict(labels)),
+                ("tokens", Value::Dict(tokens)),
+            ]);
+            let cli: Vec<&str> = cli.iter().map(|s| s.as_str()).collect();
+            // A pane that closed since the snapshot just fails; the next poll compares again.
+            let _ = self.client.client.call("pane.report_metadata", params, &cli);
+        }
     }
 
     fn forget(&mut self, tab_ids: &[String]) {
